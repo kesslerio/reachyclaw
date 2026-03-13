@@ -45,6 +45,9 @@ dependencies = [
     # OpenClaw gateway client (WebSocket protocol)
     "websockets>=12.0",
 
+    # Device identity signing for OpenClaw gateway auth
+    "cryptography>=41.0",
+
     # Gradio UI
     "gradio>=4.0.0",
 
@@ -52,7 +55,7 @@ dependencies = [
     "python-dotenv",
 
     # Reachy Mini robot SDK
-    "reachy_mini>=1.2.13,<1.3.0",
+    "reachy_mini>=1.2.13",
 ]
 
 [project.optional-dependencies]

@@ -11,6 +11,9 @@ import json
 import asyncio
 import logging
 import uuid
+import base64
+import time
+from pathlib import Path
 from typing import Optional, Any, AsyncIterator
 from dataclasses import dataclass
 
@@ -22,6 +25,72 @@ logger = logging.getLogger(__name__)
 
 # Protocol version supported by this client
 PROTOCOL_VERSION = 3
+
+
+def _load_device_identity() -> Optional[dict]:
+    """Load OpenClaw device identity from ~/.openclaw/identity/device.json."""
+    device_path = Path.home() / ".openclaw" / "identity" / "device.json"
+    if not device_path.exists():
+        logger.debug("No device identity at %s", device_path)
+        return None
+    try:
+        with open(device_path) as f:
+            data = json.load(f)
+        if data.get("deviceId") and data.get("privateKeyPem") and data.get("publicKeyPem"):
+            logger.info("Loaded device identity %s…", data["deviceId"][:16])
+            return data
+    except Exception as e:
+        logger.warning("Failed to load device identity: %s", e)
+    return None
+
+
+def _sign_device_connect(
+    identity: dict,
+    nonce: str,
+    role: str,
+    scopes: list[str],
+    token: Optional[str],
+    client_id: str,
+    client_mode: str,
+    platform: str,
+    device_family: str,
+) -> dict:
+    """Build a signed device identity block for the connect request.
+
+    Implements the v3 device auth payload used by OpenClaw >= 2026.3.10.
+    """
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    signed_at_ms = int(time.time() * 1000)
+
+    # Build v3 payload: "v3|deviceId|clientId|clientMode|role|scopes|signedAtMs|token|nonce|platform|deviceFamily"
+    payload_parts = [
+        "v3",
+        identity["deviceId"],
+        client_id,
+        client_mode,
+        role,
+        ",".join(scopes),
+        str(signed_at_ms),
+        token or "",
+        nonce,
+        platform.lower() if platform else "",
+        device_family.lower() if device_family else "",
+    ]
+    payload = "|".join(payload_parts)
+
+    # Ed25519 sign
+    private_key = load_pem_private_key(identity["privateKeyPem"].encode(), password=None)
+    signature_bytes = private_key.sign(payload.encode("utf-8"))
+    signature_b64url = base64.urlsafe_b64encode(signature_bytes).rstrip(b"=").decode()
+
+    return {
+        "id": identity["deviceId"],
+        "publicKey": identity["publicKeyPem"],
+        "signature": signature_b64url,
+        "signedAt": signed_at_ms,
+        "nonce": nonce,
+    }
 
 
 @dataclass
@@ -93,6 +162,9 @@ class OpenClawBridge:
             or "main"
         )
 
+        # Device identity for gateway auth (OpenClaw >= 2026.3.10 requires this)
+        self._device_identity = _load_device_identity()
+
         # Persistent WebSocket state
         self._ws: Optional[websockets.WebSocketClientProtocol] = None
         self._connected = False
@@ -148,25 +220,53 @@ class OpenClawBridge:
             if challenge.get("event") != "connect.challenge":
                 logger.warning("Unexpected first frame: %s", challenge.get("event"))
 
+            challenge_nonce = challenge.get("payload", {}).get("nonce", "")
+
             # 2. Send connect request
             req_id = str(uuid.uuid4())
+            role = "operator"
+            scopes = ["chat", "operator.write", "operator.read"]
+            client_id = "cli"
+            client_mode = "cli"
+            client_platform = "darwin"
+
+            params = {
+                "minProtocol": PROTOCOL_VERSION,
+                "maxProtocol": PROTOCOL_VERSION,
+                "auth": {"token": self.gateway_token} if self.gateway_token else {},
+                "client": {
+                    "id": client_id,
+                    "version": "1.0.0",
+                    "platform": client_platform,
+                    "mode": client_mode,
+                },
+                "role": role,
+                "scopes": scopes,
+            }
+
+            # Add signed device identity (required by OpenClaw >= 2026.3.10)
+            if self._device_identity and challenge_nonce:
+                try:
+                    params["device"] = _sign_device_connect(
+                        identity=self._device_identity,
+                        nonce=challenge_nonce,
+                        role=role,
+                        scopes=scopes,
+                        token=self.gateway_token,
+                        client_id=client_id,
+                        client_mode=client_mode,
+                        platform=client_platform,
+                        device_family="",
+                    )
+                    logger.info("Device identity attached to connect request")
+                except Exception as e:
+                    logger.warning("Failed to sign device identity: %s", e)
+
             connect_req = {
                 "type": "req",
                 "id": req_id,
                 "method": "connect",
-                "params": {
-                    "minProtocol": PROTOCOL_VERSION,
-                    "maxProtocol": PROTOCOL_VERSION,
-                    "auth": {"token": self.gateway_token} if self.gateway_token else {},
-                    "client": {
-                        "id": "cli",
-                        "version": "1.0.0",
-                        "platform": "darwin",
-                        "mode": "cli",
-                    },
-                    "role": "operator",
-                    "scopes": ["chat", "operator.write", "operator.read"],
-                },
+                "params": params,
             }
             await self._ws.send(json.dumps(connect_req))
 
