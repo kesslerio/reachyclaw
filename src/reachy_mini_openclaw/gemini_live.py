@@ -138,7 +138,9 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
                 await self._run_session()
                 return
             except ConnectionClosedError as e:
-                logger.warning("Gemini Live WebSocket closed unexpectedly (attempt %d/%d): %s", attempt, max_attempts, e)
+                logger.warning(
+                    "Gemini Live WebSocket closed unexpectedly (attempt %d/%d): %s", attempt, max_attempts, e
+                )
                 if attempt < max_attempts:
                     delay = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
                     logger.info("Retrying Gemini Live in %.1f seconds...", delay)
@@ -251,7 +253,6 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
 
         logger.info("Assistant: %s", response_text[:100] if len(response_text) > 100 else response_text)
         self._last_assistant_response = response_text
-        self._clear_input_suppression("assistant_transcript")
         await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": response_text}))
 
     async def _handle_turn_complete(self) -> None:

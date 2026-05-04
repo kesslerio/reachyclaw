@@ -169,7 +169,7 @@ async def test_receive_logs_send_failures(caplog):
 
 
 @pytest.mark.asyncio
-async def test_output_transcription_is_emitted_and_syncable():
+async def test_output_transcription_does_not_clear_input_suppression():
     handler, _bridge = make_handler()
     handler._last_user_message = "hello"
     handler._suppress_input_for_response()
@@ -180,4 +180,17 @@ async def test_output_transcription_is_emitted_and_syncable():
     output = await handler.output_queue.get()
     assert output.args[0] == {"role": "assistant", "content": "hi there"}
     assert handler._last_assistant_response == "hi there"
+    assert handler._is_input_suppressed()
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_clears_input_suppression_and_syncs_conversation():
+    handler, bridge = make_handler()
+    handler._last_user_message = "hello"
+    handler._last_assistant_response = "hi there"
+    handler._suppress_input_for_response()
+
+    await handler._handle_turn_complete()
+
     assert not handler._is_input_suppressed()
+    assert bridge.synced == ("hello", "hi there")
