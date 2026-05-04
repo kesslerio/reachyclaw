@@ -7,15 +7,16 @@ ReachyClaw uses OpenAI Realtime API for voice I/O (speech recognition + TTS)
 but routes all responses through OpenClaw for intelligence.
 """
 
-import json
 import asyncio
-import logging
-import uuid
 import base64
+import json
+import logging
+import sys
 import time
-from pathlib import Path
-from typing import Optional, Any, AsyncIterator
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
+from typing import AsyncIterator, Optional
 
 import websockets
 
@@ -225,10 +226,10 @@ class OpenClawBridge:
             # 2. Send connect request
             req_id = str(uuid.uuid4())
             role = "operator"
-            scopes = ["chat", "operator.write", "operator.read"]
+            scopes = ["operator.write", "operator.read"]
             client_id = "cli"
             client_mode = "cli"
-            client_platform = "darwin"
+            client_platform = sys.platform
 
             params = {
                 "minProtocol": PROTOCOL_VERSION,
