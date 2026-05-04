@@ -1,7 +1,7 @@
 """ReachyClaw - Give your OpenClaw AI agent a physical robot body.
 
 This module provides the main application that connects:
-- OpenAI Realtime API for voice I/O (speech recognition + TTS)
+- Realtime voice API for voice I/O (speech recognition + TTS)
 - OpenClaw Gateway for AI intelligence (the actual brain)
 - Reachy Mini robot for physical embodiment
 
@@ -135,7 +135,7 @@ class ReachyClawCore:
     
     This class orchestrates all components:
     - Reachy Mini robot connection and movement control
-    - OpenAI Realtime API for voice I/O
+    - Realtime voice API for voice I/O
     - OpenClaw gateway bridge for AI intelligence
     - Audio input/output loops
     """
@@ -164,8 +164,8 @@ class ReachyClawCore:
         from reachy_mini_openclaw.moves import MovementManager
         from reachy_mini_openclaw.audio.head_wobbler import HeadWobbler
         from reachy_mini_openclaw.openclaw_bridge import OpenClawBridge
+        from reachy_mini_openclaw.realtime import create_realtime_handler
         from reachy_mini_openclaw.tools.core_tools import ToolDependencies
-        from reachy_mini_openclaw.openai_realtime import OpenAIRealtimeHandler
         
         self.gateway_url = gateway_url
         self._external_stop_event = external_stop_event
@@ -252,8 +252,8 @@ class ReachyClawCore:
             vision_manager=self.vision_manager,
         )
         
-        # Initialize OpenAI Realtime handler with OpenClaw bridge
-        self.handler = OpenAIRealtimeHandler(
+        # Initialize realtime voice handler with OpenClaw bridge
+        self.handler = create_realtime_handler(
             deps=self.deps,
             openclaw_bridge=self.openclaw_bridge,
         )
@@ -374,7 +374,7 @@ class ReachyClawCore:
                 if isinstance(output, tuple):
                     input_sr, audio_data = output
                     
-                    # Convert to float32 and normalize (OpenAI sends int16)
+                    # Convert provider PCM output to float32 for robot playback
                     audio_data = audio_data.flatten().astype("float32") / 32768.0
                     
                     # Reduce volume to prevent distortion (0.5 = 50% volume)
@@ -446,8 +446,8 @@ class ReachyClawCore:
         
         logger.info("Ready! Speak to me...")
         
-        # Start OpenAI handler in background
-        handler_task = asyncio.create_task(self.handler.start_up(), name="openai-handler")
+        # Start realtime voice handler in background
+        handler_task = asyncio.create_task(self.handler.start_up(), name="realtime-handler")
         
         # Start audio loops
         self._tasks = [
