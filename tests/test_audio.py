@@ -36,6 +36,15 @@ def test_resample_audio_keeps_empty_audio_empty():
     assert sampled.size == 0
 
 
+def test_resample_audio_keeps_tiny_resampled_frame_non_empty():
+    audio = np.array([0.25], dtype=np.float32)
+
+    sampled = resample_audio(audio, 24000, 16000)
+
+    assert sampled.dtype == np.float32
+    assert sampled.shape == (1,)
+
+
 def test_pcm16_bytes_resamples_to_target_rate():
     audio = np.linspace(-0.5, 0.5, 240, dtype=np.float32)
 

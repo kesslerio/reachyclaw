@@ -58,6 +58,7 @@ class Config:
     # Format: agent:<agent_id>:<session_key>, but we only need the session key part here
     OPENCLAW_SESSION_KEY: str = field(default_factory=lambda: os.getenv("OPENCLAW_SESSION_KEY", "main"))
     OPENCLAW_VOICE_TIMEOUT: float = field(default_factory=lambda: _env_float("OPENCLAW_VOICE_TIMEOUT", 25.0))
+    GEMINI_INPUT_SUPPRESSION_TIMEOUT: float = field(default_factory=lambda: _env_float("GEMINI_INPUT_SUPPRESSION_TIMEOUT", 12.0))
     ENABLE_LATENCY_TRACING: bool = field(default_factory=lambda: _env_bool("REACHYCLAW_TRACE_LATENCY", False))
 
     # Robot Configuration
@@ -95,6 +96,8 @@ class Config:
             errors.append("GEMINI_API_KEY is required")
         if self.OPENCLAW_VOICE_TIMEOUT <= 0:
             errors.append("OPENCLAW_VOICE_TIMEOUT must be greater than 0")
+        if self.GEMINI_INPUT_SUPPRESSION_TIMEOUT <= 0:
+            errors.append("GEMINI_INPUT_SUPPRESSION_TIMEOUT must be greater than 0")
 
         return errors
 

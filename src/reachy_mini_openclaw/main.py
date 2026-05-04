@@ -354,13 +354,43 @@ class ReachyClawCore:
         
     async def record_loop(self) -> None:
         """Read audio from robot microphone and send to handler."""
+        from reachy_mini_openclaw.config import config
+
         input_sr = self.robot.media.get_input_audio_samplerate()
         logger.info("Recording at %d Hz", input_sr)
+        captured_frames = 0
+        empty_frames = 0
+        error_frames = 0
+        next_trace_at = time.monotonic() + 5.0
         
         while not self._should_stop():
-            audio_frame = self.robot.media.get_audio_sample()
-            if audio_frame is not None:
-                await self.handler.receive((input_sr, audio_frame))
+            try:
+                audio_frame = self.robot.media.get_audio_sample()
+            except Exception as e:
+                error_frames += 1
+                logger.warning("Robot microphone read failed errors=%d error=%s", error_frames, e)
+                await asyncio.sleep(0.1)
+                continue
+
+            if audio_frame is None:
+                empty_frames += 1
+            else:
+                captured_frames += 1
+                try:
+                    await self.handler.receive((input_sr, audio_frame))
+                except Exception as e:
+                    error_frames += 1
+                    logger.warning("Realtime handler rejected microphone frame errors=%d error=%s", error_frames, e)
+
+            now = time.monotonic()
+            if config.ENABLE_LATENCY_TRACING and now >= next_trace_at:
+                next_trace_at = now + 5.0
+                logger.info(
+                    "Voice trace robot_mic_loop captured=%d empty=%d errors=%d",
+                    captured_frames,
+                    empty_frames,
+                    error_frames,
+                )
             await asyncio.sleep(0.01)
             
     async def play_loop(self) -> None:

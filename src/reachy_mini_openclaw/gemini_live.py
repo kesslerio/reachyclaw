@@ -55,6 +55,8 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
         self._next_input_trace_at = 0.0
         self._input_sent_frames = 0
         self._input_suppressed_frames = 0
+        self._input_send_failures = 0
+        self._next_input_error_log_at = 0.0
         self._audio_chunks_queued = 0
 
     def copy(self) -> "GeminiLiveHandler":
@@ -249,13 +251,13 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
 
         logger.info("Assistant: %s", response_text[:100] if len(response_text) > 100 else response_text)
         self._last_assistant_response = response_text
-        self._input_suppressed_until = 0.0
+        self._clear_input_suppression("assistant_transcript")
         await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": response_text}))
 
     async def _handle_turn_complete(self) -> None:
         """Handle completion of a Gemini model turn."""
         self._speaking = False
-        self._input_suppressed_until = 0.0
+        self._clear_input_suppression("turn_complete")
         self.deps.movement_manager.set_processing(False)
         if self.deps.head_wobbler is not None:
             self.deps.head_wobbler.reset()
@@ -266,7 +268,7 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
     async def _handle_interrupted(self) -> None:
         """Handle Gemini interruption events by clearing queued audio."""
         self._speaking = False
-        self._input_suppressed_until = 0.0
+        self._clear_input_suppression("interrupted")
         self.deps.movement_manager.set_processing(False)
         while not self.output_queue.empty():
             try:
@@ -389,21 +391,40 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
                     mime_type=f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}",
                 )
             )
+            if self._input_send_failures and config.ENABLE_LATENCY_TRACING:
+                logger.info("Voice trace gemini_audio_send_recovered failures=%d", self._input_send_failures)
+            self._input_send_failures = 0
             self._input_sent_frames += 1
             self._trace_input_frames("sent")
         except Exception as e:
-            logger.debug("Failed to send Gemini audio: %s", e)
+            self._input_send_failures += 1
+            now = time.monotonic()
+            if now >= self._next_input_error_log_at:
+                self._next_input_error_log_at = now + 30.0
+                logger.warning("Failed to send Gemini audio frames failures=%d error=%s", self._input_send_failures, e)
 
     def _suppress_input_for_response(self) -> None:
         """Pause mic streaming while Gemini is waiting on or speaking a response."""
-        self._input_suppressed_until = time.monotonic() + config.OPENCLAW_VOICE_TIMEOUT + 10.0
+        self._input_suppressed_until = time.monotonic() + config.GEMINI_INPUT_SUPPRESSION_TIMEOUT
+        if config.ENABLE_LATENCY_TRACING:
+            logger.info(
+                "Voice trace gemini_input_suppressed timeoutSec=%.1f",
+                config.GEMINI_INPUT_SUPPRESSION_TIMEOUT,
+            )
+
+    def _clear_input_suppression(self, reason: str) -> None:
+        if not self._input_suppressed_until:
+            return
+        self._input_suppressed_until = 0.0
+        if config.ENABLE_LATENCY_TRACING:
+            logger.info("Voice trace gemini_input_unsuppressed reason=%s", reason)
 
     def _is_input_suppressed(self) -> bool:
         if not self._input_suppressed_until:
             return False
         if time.monotonic() < self._input_suppressed_until:
             return True
-        self._input_suppressed_until = 0.0
+        self._clear_input_suppression("timeout")
         return False
 
     def _trace_input_frames(self, state: str) -> None:
@@ -418,7 +439,7 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
             state,
             self._input_sent_frames,
             self._input_suppressed_frames,
-            bool(self._input_suppressed_until),
+            self._input_suppressed_until > now,
         )
 
     async def emit(self) -> tuple[int, NDArray[np.int16]] | AdditionalOutputs | None:

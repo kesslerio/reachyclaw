@@ -43,7 +43,7 @@ def resample_audio(audio: NDArray[np.float32], input_sample_rate: int, output_sa
     if input_sample_rate == output_sample_rate or len(audio) == 0:
         return audio
 
-    num_samples = int(len(audio) * output_sample_rate / input_sample_rate)
+    num_samples = max(1, round(len(audio) * output_sample_rate / input_sample_rate))
     return resample(audio, num_samples).astype(np.float32)
 
 

@@ -1,8 +1,11 @@
+import logging
+import time
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from reachy_mini_openclaw.config import config
 from reachy_mini_openclaw.gemini_live import GEMINI_OUTPUT_SAMPLE_RATE, GeminiLiveHandler, is_normal_gemini_close
 from reachy_mini_openclaw.openclaw_bridge import OpenClawResponse
 
@@ -131,6 +134,38 @@ async def test_receive_skips_audio_while_response_input_is_suppressed():
     await handler.receive((16000, np.array([100], dtype=np.int16)))
 
     assert calls == []
+
+
+def test_input_suppression_uses_gemini_timeout(monkeypatch):
+    handler, _bridge = make_handler()
+    monkeypatch.setattr(config, "GEMINI_INPUT_SUPPRESSION_TIMEOUT", 1.5)
+
+    started_at = time.monotonic()
+    handler._suppress_input_for_response()
+
+    assert 1.0 <= handler._input_suppressed_until - started_at <= 2.0
+
+
+@pytest.mark.asyncio
+async def test_receive_logs_send_failures(caplog):
+    handler, _bridge = make_handler()
+
+    class DummyConnection:
+        async def send_realtime_input(self, **kwargs):
+            raise RuntimeError("session closed")
+
+    class DummyTypes:
+        class Blob:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+    handler.connection = DummyConnection()
+    handler._types = DummyTypes
+
+    with caplog.at_level(logging.WARNING):
+        await handler.receive((16000, np.array([100], dtype=np.int16)))
+
+    assert "Failed to send Gemini audio frames failures=1 error=session closed" in caplog.text
 
 
 @pytest.mark.asyncio

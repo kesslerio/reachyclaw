@@ -7,6 +7,7 @@ def clear_provider_env(monkeypatch):
         "OPENAI_API_KEY",
         "GEMINI_API_KEY",
         "GEMINI_MODEL",
+        "GEMINI_INPUT_SUPPRESSION_TIMEOUT",
         "OPENCLAW_VOICE_TIMEOUT",
         "REACHYCLAW_TRACE_LATENCY",
     ]:
@@ -67,6 +68,7 @@ def test_voice_timeout_defaults_to_25_seconds(monkeypatch):
     cfg = Config()
 
     assert cfg.OPENCLAW_VOICE_TIMEOUT == 25.0
+    assert cfg.GEMINI_INPUT_SUPPRESSION_TIMEOUT == 12.0
 
 
 def test_voice_timeout_is_validated(monkeypatch):
@@ -78,6 +80,17 @@ def test_voice_timeout_is_validated(monkeypatch):
     cfg = Config()
 
     assert cfg.validate() == ["OPENCLAW_VOICE_TIMEOUT must be greater than 0"]
+
+
+def test_gemini_input_suppression_timeout_is_validated(monkeypatch):
+    clear_provider_env(monkeypatch)
+    monkeypatch.setenv("REALTIME_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setenv("GEMINI_INPUT_SUPPRESSION_TIMEOUT", "0")
+
+    cfg = Config()
+
+    assert cfg.validate() == ["GEMINI_INPUT_SUPPRESSION_TIMEOUT must be greater than 0"]
 
 
 def test_latency_tracing_accepts_common_true_values(monkeypatch):
