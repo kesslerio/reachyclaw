@@ -1,6 +1,12 @@
 import numpy as np
 
-from reachy_mini_openclaw.audio import pcm16_bytes, pcm16_frame, resample_audio, to_mono_float32
+from reachy_mini_openclaw.audio import (
+    pcm16_bytes,
+    pcm16_frame,
+    playback_audio_frame,
+    resample_audio,
+    to_mono_float32,
+)
 
 
 def test_to_mono_float32_normalizes_int16_audio():
@@ -46,3 +52,20 @@ def test_pcm16_frame_returns_fastrtc_shape():
     assert frame.dtype == np.int16
     assert frame.shape == (1, 4)
     assert frame.tolist() == [[1, -1, 2, -2]]
+
+
+def test_playback_audio_frame_keeps_tiny_resampled_chunk_non_empty():
+    audio = np.array([[100]], dtype=np.int16)
+
+    frame = playback_audio_frame(audio, 24000, 16000)
+
+    assert frame.dtype == np.float32
+    assert frame.shape == (1,)
+
+
+def test_playback_audio_frame_keeps_empty_audio_empty():
+    audio = np.array([], dtype=np.int16)
+
+    frame = playback_audio_frame(audio, 24000, 16000)
+
+    assert frame.size == 0

@@ -15,6 +15,7 @@ __all__ = [
     "HeadWobbler",
     "pcm16_bytes",
     "pcm16_frame",
+    "playback_audio_frame",
     "resample_audio",
     "to_mono_float32",
 ]
@@ -57,3 +58,22 @@ def pcm16_bytes(audio: NDArray, input_sample_rate: int, output_sample_rate: int)
 def pcm16_frame(data: bytes) -> NDArray[np.int16]:
     """Convert raw PCM16 bytes to the frame shape expected by FastRTC."""
     return np.frombuffer(data, dtype=np.int16).reshape(1, -1)
+
+
+def playback_audio_frame(
+    audio: NDArray[np.int16],
+    input_sample_rate: int,
+    output_sample_rate: int,
+    volume: float = 0.5,
+) -> NDArray[np.float32]:
+    """Convert provider PCM16 output to float32 robot playback samples."""
+    samples = audio.flatten().astype(np.float32) / PCM16_MIN_SCALE
+    if samples.size == 0:
+        return samples
+
+    samples = samples * volume
+    if input_sample_rate == output_sample_rate:
+        return samples.astype(np.float32)
+
+    sample_count = max(1, round(len(samples) * output_sample_rate / input_sample_rate))
+    return resample(samples, sample_count).astype(np.float32)

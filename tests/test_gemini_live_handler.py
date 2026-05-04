@@ -77,6 +77,7 @@ def test_live_config_includes_audio_transcription_voice_and_tool():
     assert live_config["system_instruction"] == "relay instructions"
     assert live_config["input_audio_transcription"] == {}
     assert live_config["output_audio_transcription"] == {}
+    assert "realtime_input_config" not in live_config
     assert live_config["speech_config"]["voice_config"]["prebuilt_voice_config"]["voice_name"]
     assert live_config["tools"][0]["function_declarations"][0]["name"] == "ask_openclaw"
 
@@ -110,9 +111,33 @@ async def test_queue_audio_emits_24khz_pcm_frame():
 
 
 @pytest.mark.asyncio
+async def test_receive_skips_audio_while_response_input_is_suppressed():
+    handler, _bridge = make_handler()
+    calls = []
+
+    class DummyConnection:
+        async def send_realtime_input(self, **kwargs):
+            calls.append(kwargs)
+
+    class DummyTypes:
+        class Blob:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+    handler.connection = DummyConnection()
+    handler._types = DummyTypes
+    handler._suppress_input_for_response()
+
+    await handler.receive((16000, np.array([100], dtype=np.int16)))
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_output_transcription_is_emitted_and_syncable():
     handler, _bridge = make_handler()
     handler._last_user_message = "hello"
+    handler._suppress_input_for_response()
 
     await handler._handle_output_transcription(SimpleNamespace(text="hi", finished=False))
     await handler._handle_output_transcription(SimpleNamespace(text=" there", finished=True))
@@ -120,3 +145,4 @@ async def test_output_transcription_is_emitted_and_syncable():
     output = await handler.output_queue.get()
     assert output.args[0] == {"role": "assistant", "content": "hi there"}
     assert handler._last_assistant_response == "hi there"
+    assert not handler._is_input_suppressed()

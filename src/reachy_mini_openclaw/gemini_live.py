@@ -51,6 +51,11 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
         self.connection: Any = None
         self._types: Any = None
         self._assistant_transcript_parts: list[str] = []
+        self._input_suppressed_until = 0.0
+        self._next_input_trace_at = 0.0
+        self._input_sent_frames = 0
+        self._input_suppressed_frames = 0
+        self._audio_chunks_queued = 0
 
     def copy(self) -> "GeminiLiveHandler":
         """Create a copy of the handler (required by fastrtc)."""
@@ -244,11 +249,13 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
 
         logger.info("Assistant: %s", response_text[:100] if len(response_text) > 100 else response_text)
         self._last_assistant_response = response_text
+        self._input_suppressed_until = 0.0
         await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": response_text}))
 
     async def _handle_turn_complete(self) -> None:
         """Handle completion of a Gemini model turn."""
         self._speaking = False
+        self._input_suppressed_until = 0.0
         self.deps.movement_manager.set_processing(False)
         if self.deps.head_wobbler is not None:
             self.deps.head_wobbler.reset()
@@ -259,6 +266,7 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
     async def _handle_interrupted(self) -> None:
         """Handle Gemini interruption events by clearing queued audio."""
         self._speaking = False
+        self._input_suppressed_until = 0.0
         self.deps.movement_manager.set_processing(False)
         while not self.output_queue.empty():
             try:
@@ -281,6 +289,15 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
         if not audio_bytes:
             return
 
+        self._audio_chunks_queued += 1
+        if config.ENABLE_LATENCY_TRACING:
+            logger.info(
+                "Voice trace gemini_audio_queued chunk=%d bytes=%d samples=%d",
+                self._audio_chunks_queued,
+                len(audio_bytes),
+                len(audio_bytes) // 2,
+            )
+
         if self.deps.head_wobbler is not None:
             self.deps.head_wobbler.feed(base64.b64encode(audio_bytes).decode("utf-8"))
 
@@ -293,6 +310,7 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
         if not function_calls:
             return
 
+        self._suppress_input_for_response()
         self.deps.movement_manager.set_processing(True)
         function_responses = []
 
@@ -355,6 +373,10 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
         """Receive audio from the robot microphone and send it to Gemini Live."""
         if not self.connection or self._types is None:
             return
+        if self._is_input_suppressed():
+            self._input_suppressed_frames += 1
+            self._trace_input_frames("suppressed")
+            return
 
         input_sr, audio = frame
         try:
@@ -367,8 +389,37 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
                     mime_type=f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}",
                 )
             )
+            self._input_sent_frames += 1
+            self._trace_input_frames("sent")
         except Exception as e:
             logger.debug("Failed to send Gemini audio: %s", e)
+
+    def _suppress_input_for_response(self) -> None:
+        """Pause mic streaming while Gemini is waiting on or speaking a response."""
+        self._input_suppressed_until = time.monotonic() + config.OPENCLAW_VOICE_TIMEOUT + 10.0
+
+    def _is_input_suppressed(self) -> bool:
+        if not self._input_suppressed_until:
+            return False
+        if time.monotonic() < self._input_suppressed_until:
+            return True
+        self._input_suppressed_until = 0.0
+        return False
+
+    def _trace_input_frames(self, state: str) -> None:
+        if not config.ENABLE_LATENCY_TRACING:
+            return
+        now = time.monotonic()
+        if now < self._next_input_trace_at:
+            return
+        self._next_input_trace_at = now + 5.0
+        logger.info(
+            "Voice trace gemini_mic_frames state=%s sent=%d suppressed=%d suppressionActive=%s",
+            state,
+            self._input_sent_frames,
+            self._input_suppressed_frames,
+            bool(self._input_suppressed_until),
+        )
 
     async def emit(self) -> tuple[int, NDArray[np.int16]] | AdditionalOutputs | None:
         """Get the next output (audio or transcript)."""

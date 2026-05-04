@@ -374,19 +374,19 @@ class ReachyClawCore:
                 if isinstance(output, tuple):
                     input_sr, audio_data = output
                     
-                    # Convert provider PCM output to float32 for robot playback
-                    audio_data = audio_data.flatten().astype("float32") / 32768.0
-                    
-                    # Reduce volume to prevent distortion (0.5 = 50% volume)
-                    audio_data = audio_data * 0.5
-                    
-                    # Resample if needed
-                    if input_sr != output_sr:
-                        from scipy.signal import resample
-                        num_samples = int(len(audio_data) * output_sr / input_sr)
-                        audio_data = resample(audio_data, num_samples).astype("float32")
-                        
-                    self.robot.media.push_audio_sample(audio_data)
+                    from reachy_mini_openclaw.audio import playback_audio_frame
+                    from reachy_mini_openclaw.config import config
+
+                    audio_data = playback_audio_frame(audio_data, input_sr, output_sr)
+                    if audio_data.size > 0:
+                        if config.ENABLE_LATENCY_TRACING:
+                            logger.info(
+                                "Voice trace playback_push inputSr=%d outputSr=%d samples=%d",
+                                input_sr,
+                                output_sr,
+                                audio_data.size,
+                            )
+                        self.robot.media.push_audio_sample(audio_data)
                 # else: it's an AdditionalOutputs (transcript) - handle in UI mode
                 
             await asyncio.sleep(0.01)
