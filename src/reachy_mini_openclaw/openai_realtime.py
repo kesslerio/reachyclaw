@@ -9,24 +9,29 @@ the result verbatim. OpenClaw is the brain — it controls personality, memory,
 and robot body actions via inline tags like [EMOTION:happy] and [DANCE:wave].
 """
 
-import json
-import base64
-import random
 import asyncio
+import base64
+import json
 import logging
+import random
+import time
+import uuid
 from typing import Any, Final, Literal, Optional, Tuple
-from datetime import datetime
 
 import numpy as np
+from fastrtc import AdditionalOutputs, AsyncStreamHandler, wait_for_item
 from numpy.typing import NDArray
 from openai import AsyncOpenAI
-from fastrtc import AdditionalOutputs, AsyncStreamHandler, wait_for_item
 from scipy.signal import resample
 from websockets.exceptions import ConnectionClosedError
 
 from reachy_mini_openclaw.config import config
 from reachy_mini_openclaw.prompts import get_session_voice
-from reachy_mini_openclaw.tools.core_tools import ToolDependencies, dispatch_tool_call, get_body_actions_description
+from reachy_mini_openclaw.tools.core_tools import (
+    ToolDependencies,
+    dispatch_tool_call,
+    get_body_actions_description,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +176,12 @@ Never generate your own text — only speak what this tool returns.""",
             })
 
         return tools
+
+    def _new_trace_id(self, provider: str, tool_name: str) -> str | None:
+        """Create a compact trace ID when latency tracing is enabled."""
+        if not config.ENABLE_LATENCY_TRACING:
+            return None
+        return f"{provider}.{tool_name}.{uuid.uuid4().hex[:12]}"
         
     async def start_up(self) -> None:
         """Start the handler and connect to OpenAI."""
@@ -354,6 +365,10 @@ Never generate your own text — only speak what this tool returns.""",
             return
             
         logger.info("Tool call: %s(%s)", tool_name, args_json[:50] if len(args_json) > 50 else args_json)
+        trace_id = self._new_trace_id("openai", tool_name)
+        started_at = time.monotonic()
+        if trace_id:
+            logger.info("Voice trace tool_start traceId=%s provider=openai tool=%s", trace_id, tool_name)
         
         # Start thinking animation while we process the tool call.
         # It will stop when the next audio delta arrives or response completes.
@@ -361,7 +376,7 @@ Never generate your own text — only speak what this tool returns.""",
         
         try:
             if tool_name == "ask_openclaw":
-                result = await self._handle_openclaw_query(args_json)
+                result = await self._handle_openclaw_query(args_json, trace_id=trace_id)
             else:
                 # Robot movement tools - dispatch locally
                 result = await dispatch_tool_call(tool_name, args_json, self.deps)
@@ -370,6 +385,14 @@ Never generate your own text — only speak what this tool returns.""",
         except Exception as e:
             logger.error("Tool '%s' failed: %s", tool_name, e)
             result = {"error": str(e)}
+        finally:
+            if trace_id:
+                logger.info(
+                    "Voice trace tool_done traceId=%s provider=openai tool=%s elapsedMs=%d",
+                    trace_id,
+                    tool_name,
+                    int((time.monotonic() - started_at) * 1000),
+                )
             
         # Send result back to continue the conversation
         if isinstance(call_id, str) and self.connection:
@@ -380,6 +403,12 @@ Never generate your own text — only speak what this tool returns.""",
                     "output": json.dumps(result),
                 }
             )
+            if trace_id:
+                logger.info(
+                    "Voice trace tool_response_sent traceId=%s provider=openai elapsedMs=%d",
+                    trace_id,
+                    int((time.monotonic() - started_at) * 1000),
+                )
             # Trigger response generation after tool result
             try:
                 await self.connection.response.create()
@@ -405,12 +434,13 @@ Never generate your own text — only speak what this tool returns.""",
             except Exception as e:
                 logger.debug("Failed to sync conversation: %s", e)
     
-    async def _handle_openclaw_query(self, args_json: str) -> dict:
+    async def _handle_openclaw_query(self, args_json: str, trace_id: str | None = None) -> dict:
         """Handle a query to OpenClaw."""
         if self.openclaw_bridge is None or not self.openclaw_bridge.is_connected:
             return {"error": "OpenClaw not connected"}
 
         try:
+            started_at = time.monotonic()
             args = json.loads(args_json)
             query = args.get("query", "")
             include_image = args.get("include_image", False)
@@ -430,19 +460,46 @@ Never generate your own text — only speak what this tool returns.""",
                 query,
                 image_b64=image_b64,
                 system_context=REACHY_BODY_CONTEXT,
+                timeout=config.OPENCLAW_VOICE_TIMEOUT,
+                trace_id=trace_id,
             )
+            if trace_id:
+                logger.info(
+                    "Voice trace openclaw_done traceId=%s elapsedMs=%d bridgeElapsedMs=%s runId=%s error=%s",
+                    trace_id,
+                    int((time.monotonic() - started_at) * 1000),
+                    response.elapsed_ms,
+                    response.run_id or "-",
+                    response.error or "-",
+                )
 
             if response.error:
-                return {"error": response.error}
+                result = {"error": response.error}
+                if trace_id:
+                    result["trace_id"] = trace_id
+                return result
 
             # Parse and execute any action commands from OpenClaw's response
+            action_started_at = time.monotonic()
             spoken_text = await self._execute_body_actions(response.content)
+            if trace_id:
+                logger.info(
+                    "Voice trace actions_done traceId=%s elapsedMs=%d",
+                    trace_id,
+                    int((time.monotonic() - action_started_at) * 1000),
+                )
 
-            return {"response": spoken_text}
+            result = {"response": spoken_text}
+            if trace_id:
+                result["trace_id"] = trace_id
+            return result
 
         except Exception as e:
             logger.error("OpenClaw query failed: %s", e)
-            return {"error": str(e)}
+            result = {"error": str(e)}
+            if trace_id:
+                result["trace_id"] = trace_id
+            return result
 
     async def _execute_body_actions(self, text: str) -> str:
         """Parse action tags from OpenClaw's response, execute them, and return clean text.

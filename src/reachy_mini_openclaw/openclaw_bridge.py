@@ -7,15 +7,16 @@ ReachyClaw uses OpenAI Realtime API for voice I/O (speech recognition + TTS)
 but routes all responses through OpenClaw for intelligence.
 """
 
-import json
 import asyncio
-import logging
-import uuid
 import base64
+import json
+import logging
+import sys
 import time
-from pathlib import Path
-from typing import Optional, Any, AsyncIterator
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
+from typing import AsyncIterator, Optional
 
 import websockets
 
@@ -98,6 +99,10 @@ class OpenClawResponse:
     """Response from OpenClaw gateway."""
     content: str
     error: Optional[str] = None
+    trace_id: Optional[str] = None
+    run_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
+    elapsed_ms: Optional[int] = None
 
 
 class OpenClawBridge:
@@ -175,6 +180,7 @@ class OpenClawBridge:
         self._pending: dict[str, asyncio.Future] = {}
         # Events keyed by runId -> list of event payloads
         self._run_events: dict[str, asyncio.Queue] = {}
+        self._run_event_backlog: dict[str, list[dict]] = {}
 
     # ------------------------------------------------------------------
     # URL helpers
@@ -225,10 +231,10 @@ class OpenClawBridge:
             # 2. Send connect request
             req_id = str(uuid.uuid4())
             role = "operator"
-            scopes = ["chat", "operator.write", "operator.read"]
+            scopes = ["operator.write", "operator.read"]
             client_id = "cli"
             client_mode = "cli"
-            client_platform = "darwin"
+            client_platform = sys.platform
 
             params = {
                 "minProtocol": PROTOCOL_VERSION,
@@ -369,6 +375,13 @@ class OpenClawBridge:
             run_id = payload.get("runId")
             if run_id and run_id in self._run_events:
                 await self._run_events[run_id].put(msg)
+            elif run_id:
+                backlog = self._run_event_backlog.setdefault(run_id, [])
+                backlog.append(msg)
+                if len(backlog) > 20:
+                    del backlog[:-20]
+                if len(self._run_event_backlog) > 50:
+                    self._run_event_backlog.pop(next(iter(self._run_event_backlog)), None)
 
             # Ignore noisy events silently
             if event_name in ("health", "tick"):
@@ -426,6 +439,8 @@ class OpenClawBridge:
         message: str,
         image_b64: Optional[str] = None,
         system_context: Optional[str] = None,
+        timeout: Optional[float] = None,
+        trace_id: Optional[str] = None,
     ) -> OpenClawResponse:
         """Send a message to OpenClaw and get a response.
 
@@ -443,7 +458,7 @@ class OpenClawBridge:
             OpenClawResponse with the AI's response
         """
         if not self._connected:
-            return OpenClawResponse(content="", error="Not connected to OpenClaw")
+            return OpenClawResponse(content="", error="Not connected to OpenClaw", trace_id=trace_id)
 
         # Prefix system context if provided
         final_message = message
@@ -457,6 +472,9 @@ class OpenClawBridge:
 
         idempotency_key = str(uuid.uuid4())
         session_key = self._full_session_key()
+        started_at = time.monotonic()
+        trace_enabled = bool(trace_id or config.ENABLE_LATENCY_TRACING)
+        request_timeout = timeout or self.timeout
 
         # Create a queue to collect events for this run
         # We'll get the runId from the response
@@ -468,30 +486,75 @@ class OpenClawBridge:
 
         try:
             # Send the request
-            resp = await self._send_request("chat.send", params, timeout=30)
+            if trace_enabled:
+                logger.info(
+                    "OpenClaw trace start traceId=%s agent=%s session=%s idempotencyKey=%s queryChars=%d image=%s",
+                    trace_id or "-",
+                    self.agent_id,
+                    self.session_key,
+                    idempotency_key,
+                    len(message),
+                    bool(image_b64),
+                )
+
+            resp = await self._send_request("chat.send", params, timeout=min(30, request_timeout))
+            ack_elapsed_ms = int((time.monotonic() - started_at) * 1000)
 
             if not resp.get("ok"):
                 err = resp.get("error", {})
                 error_msg = f"{err.get('code', 'UNKNOWN')}: {err.get('message', 'Unknown error')}"
-                logger.error("chat.send failed: %s", error_msg)
-                return OpenClawResponse(content="", error=error_msg)
+                logger.error("chat.send failed traceId=%s elapsedMs=%d error=%s", trace_id or "-", ack_elapsed_ms, error_msg)
+                return OpenClawResponse(
+                    content="",
+                    error=error_msg,
+                    trace_id=trace_id,
+                    idempotency_key=idempotency_key,
+                    elapsed_ms=ack_elapsed_ms,
+                )
 
             run_id = resp.get("payload", {}).get("runId")
             if not run_id:
-                return OpenClawResponse(content="", error="No runId in response")
+                return OpenClawResponse(
+                    content="",
+                    error="No runId in response",
+                    trace_id=trace_id,
+                    idempotency_key=idempotency_key,
+                    elapsed_ms=ack_elapsed_ms,
+                )
+
+            if trace_enabled:
+                logger.info(
+                    "OpenClaw trace ack traceId=%s runId=%s idempotencyKey=%s elapsedMs=%d",
+                    trace_id or "-",
+                    run_id,
+                    idempotency_key,
+                    ack_elapsed_ms,
+                )
 
             # Register a queue to receive events for this run
             event_queue: asyncio.Queue = asyncio.Queue()
             self._run_events[run_id] = event_queue
+            for backlog_event in self._run_event_backlog.pop(run_id, []):
+                event_queue.put_nowait(backlog_event)
 
             try:
                 # Collect the streamed response
                 full_text = ""
+                first_event_seen = False
                 while True:
                     try:
                         event = await asyncio.wait_for(
-                            event_queue.get(), timeout=self.timeout
+                            event_queue.get(), timeout=request_timeout
                         )
+                        if trace_enabled and not first_event_seen:
+                            first_event_seen = True
+                            logger.info(
+                                "OpenClaw trace first_event traceId=%s runId=%s elapsedMs=%d event=%s",
+                                trace_id or "-",
+                                run_id,
+                                int((time.monotonic() - started_at) * 1000),
+                                event.get("event", ""),
+                            )
                         payload = event.get("payload", {})
                         event_name = event.get("event", "")
 
@@ -522,19 +585,55 @@ class OpenClawBridge:
                                 break
 
                     except asyncio.TimeoutError:
-                        logger.warning("Timeout waiting for chat response (runId=%s)", run_id)
+                        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                        logger.warning(
+                            "Timeout waiting for chat response traceId=%s runId=%s elapsedMs=%d",
+                            trace_id or "-",
+                            run_id,
+                            elapsed_ms,
+                        )
                         if full_text:
                             break
-                        return OpenClawResponse(content="", error="Response timeout")
+                        return OpenClawResponse(
+                            content="",
+                            error="Response timeout",
+                            trace_id=trace_id,
+                            run_id=run_id,
+                            idempotency_key=idempotency_key,
+                            elapsed_ms=elapsed_ms,
+                        )
 
-                return OpenClawResponse(content=full_text)
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                if trace_enabled:
+                    logger.info(
+                        "OpenClaw trace complete traceId=%s runId=%s idempotencyKey=%s elapsedMs=%d responseChars=%d",
+                        trace_id or "-",
+                        run_id,
+                        idempotency_key,
+                        elapsed_ms,
+                        len(full_text),
+                    )
+                return OpenClawResponse(
+                    content=full_text,
+                    trace_id=trace_id,
+                    run_id=run_id,
+                    idempotency_key=idempotency_key,
+                    elapsed_ms=elapsed_ms,
+                )
 
             finally:
                 self._run_events.pop(run_id, None)
 
         except Exception as e:
-            logger.error("OpenClaw chat error: %s", e)
-            return OpenClawResponse(content="", error=str(e))
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            logger.error("OpenClaw chat error traceId=%s elapsedMs=%d error=%s", trace_id or "-", elapsed_ms, e)
+            return OpenClawResponse(
+                content="",
+                error=str(e),
+                trace_id=trace_id,
+                idempotency_key=idempotency_key,
+                elapsed_ms=elapsed_ms,
+            )
 
     async def stream_chat(
         self,
@@ -579,9 +678,10 @@ class OpenClawBridge:
 
             event_queue: asyncio.Queue = asyncio.Queue()
             self._run_events[run_id] = event_queue
+            for backlog_event in self._run_event_backlog.pop(run_id, []):
+                event_queue.put_nowait(backlog_event)
 
             try:
-                prev_text = ""
                 while True:
                     try:
                         event = await asyncio.wait_for(

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "reachyclaw"
 version = "0.1.1"
-description = "ReachyClaw - Give your OpenClaw AI agent a physical robot body with Reachy Mini. OpenClaw is the brain; OpenAI Realtime API handles voice I/O."
+description = "ReachyClaw - Give your OpenClaw AI agent a physical robot body with Reachy Mini. OpenClaw is the brain; realtime voice APIs handle voice I/O."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
@@ -19,6 +19,7 @@ keywords = [
     "robotics",
     "ai-assistant",
     "openai-realtime",
+    "gemini-live",
     "voice-conversation",
     "expressive-robot",
     "embodied-ai"
@@ -34,8 +35,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Human Machine Interfaces",
 ]
 dependencies = [
-    # OpenAI Realtime API
+    # Realtime voice APIs
     "openai>=1.50.0",
+    "google-genai>=1.74.0",
 
     # Audio streaming
     "fastrtc>=0.0.17",

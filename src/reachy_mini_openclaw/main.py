@@ -1,7 +1,7 @@
 """ReachyClaw - Give your OpenClaw AI agent a physical robot body.
 
 This module provides the main application that connects:
-- OpenAI Realtime API for voice I/O (speech recognition + TTS)
+- Realtime voice API for voice I/O (speech recognition + TTS)
 - OpenClaw Gateway for AI intelligence (the actual brain)
 - Reachy Mini robot for physical embodiment
 
@@ -135,7 +135,7 @@ class ReachyClawCore:
     
     This class orchestrates all components:
     - Reachy Mini robot connection and movement control
-    - OpenAI Realtime API for voice I/O
+    - Realtime voice API for voice I/O
     - OpenClaw gateway bridge for AI intelligence
     - Audio input/output loops
     """
@@ -164,8 +164,8 @@ class ReachyClawCore:
         from reachy_mini_openclaw.moves import MovementManager
         from reachy_mini_openclaw.audio.head_wobbler import HeadWobbler
         from reachy_mini_openclaw.openclaw_bridge import OpenClawBridge
+        from reachy_mini_openclaw.realtime import create_realtime_handler
         from reachy_mini_openclaw.tools.core_tools import ToolDependencies
-        from reachy_mini_openclaw.openai_realtime import OpenAIRealtimeHandler
         
         self.gateway_url = gateway_url
         self._external_stop_event = external_stop_event
@@ -252,8 +252,8 @@ class ReachyClawCore:
             vision_manager=self.vision_manager,
         )
         
-        # Initialize OpenAI Realtime handler with OpenClaw bridge
-        self.handler = OpenAIRealtimeHandler(
+        # Initialize realtime voice handler with OpenClaw bridge
+        self.handler = create_realtime_handler(
             deps=self.deps,
             openclaw_bridge=self.openclaw_bridge,
         )
@@ -354,13 +354,43 @@ class ReachyClawCore:
         
     async def record_loop(self) -> None:
         """Read audio from robot microphone and send to handler."""
+        from reachy_mini_openclaw.config import config
+
         input_sr = self.robot.media.get_input_audio_samplerate()
         logger.info("Recording at %d Hz", input_sr)
+        captured_frames = 0
+        empty_frames = 0
+        error_frames = 0
+        next_trace_at = time.monotonic() + 5.0
         
         while not self._should_stop():
-            audio_frame = self.robot.media.get_audio_sample()
-            if audio_frame is not None:
-                await self.handler.receive((input_sr, audio_frame))
+            try:
+                audio_frame = self.robot.media.get_audio_sample()
+            except Exception as e:
+                error_frames += 1
+                logger.warning("Robot microphone read failed errors=%d error=%s", error_frames, e)
+                await asyncio.sleep(0.1)
+                continue
+
+            if audio_frame is None:
+                empty_frames += 1
+            else:
+                captured_frames += 1
+                try:
+                    await self.handler.receive((input_sr, audio_frame))
+                except Exception as e:
+                    error_frames += 1
+                    logger.warning("Realtime handler rejected microphone frame errors=%d error=%s", error_frames, e)
+
+            now = time.monotonic()
+            if config.ENABLE_LATENCY_TRACING and now >= next_trace_at:
+                next_trace_at = now + 5.0
+                logger.info(
+                    "Voice trace robot_mic_loop captured=%d empty=%d errors=%d",
+                    captured_frames,
+                    empty_frames,
+                    error_frames,
+                )
             await asyncio.sleep(0.01)
             
     async def play_loop(self) -> None:
@@ -374,19 +404,19 @@ class ReachyClawCore:
                 if isinstance(output, tuple):
                     input_sr, audio_data = output
                     
-                    # Convert to float32 and normalize (OpenAI sends int16)
-                    audio_data = audio_data.flatten().astype("float32") / 32768.0
-                    
-                    # Reduce volume to prevent distortion (0.5 = 50% volume)
-                    audio_data = audio_data * 0.5
-                    
-                    # Resample if needed
-                    if input_sr != output_sr:
-                        from scipy.signal import resample
-                        num_samples = int(len(audio_data) * output_sr / input_sr)
-                        audio_data = resample(audio_data, num_samples).astype("float32")
-                        
-                    self.robot.media.push_audio_sample(audio_data)
+                    from reachy_mini_openclaw.audio import playback_audio_frame
+                    from reachy_mini_openclaw.config import config
+
+                    audio_data = playback_audio_frame(audio_data, input_sr, output_sr)
+                    if audio_data.size > 0:
+                        if config.ENABLE_LATENCY_TRACING:
+                            logger.info(
+                                "Voice trace playback_push inputSr=%d outputSr=%d samples=%d",
+                                input_sr,
+                                output_sr,
+                                audio_data.size,
+                            )
+                        self.robot.media.push_audio_sample(audio_data)
                 # else: it's an AdditionalOutputs (transcript) - handle in UI mode
                 
             await asyncio.sleep(0.01)
@@ -446,8 +476,8 @@ class ReachyClawCore:
         
         logger.info("Ready! Speak to me...")
         
-        # Start OpenAI handler in background
-        handler_task = asyncio.create_task(self.handler.start_up(), name="openai-handler")
+        # Start realtime voice handler in background
+        handler_task = asyncio.create_task(self.handler.start_up(), name="realtime-handler")
         
         # Start audio loops
         self._tasks = [
