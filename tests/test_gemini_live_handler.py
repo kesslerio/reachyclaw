@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from reachy_mini_openclaw import gemini_live
 from reachy_mini_openclaw.config import config
 from reachy_mini_openclaw.gemini_live import GEMINI_OUTPUT_SAMPLE_RATE, GeminiLiveHandler, is_normal_gemini_close
 from reachy_mini_openclaw.openclaw_bridge import OpenClawResponse
@@ -83,6 +84,32 @@ def test_live_config_includes_audio_transcription_voice_and_tool():
     assert "realtime_input_config" not in live_config
     assert live_config["speech_config"]["voice_config"]["prebuilt_voice_config"]["voice_name"]
     assert live_config["tools"][0]["function_declarations"][0]["name"] == "ask_openclaw"
+
+
+@pytest.mark.asyncio
+async def test_start_up_reconnects_after_clean_session_end(monkeypatch):
+    handler, _bridge = make_handler()
+    runs = 0
+    delays = []
+
+    async def run_session():
+        nonlocal runs
+        runs += 1
+        if runs == 2:
+            handler._shutdown_requested = True
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(config, "GEMINI_API_KEY", "test-gemini-key")
+    monkeypatch.setattr(gemini_live.random, "uniform", lambda _minimum, _maximum: 0.0)
+    monkeypatch.setattr(gemini_live.asyncio, "sleep", sleep)
+    monkeypatch.setattr(handler, "_run_session", run_session)
+
+    await handler.start_up()
+
+    assert runs == 2
+    assert delays == [1.0]
 
 
 @pytest.mark.asyncio
@@ -169,7 +196,7 @@ async def test_receive_logs_send_failures(caplog):
 
 
 @pytest.mark.asyncio
-async def test_output_transcription_is_emitted_and_syncable():
+async def test_output_transcription_does_not_clear_input_suppression():
     handler, _bridge = make_handler()
     handler._last_user_message = "hello"
     handler._suppress_input_for_response()
@@ -180,4 +207,17 @@ async def test_output_transcription_is_emitted_and_syncable():
     output = await handler.output_queue.get()
     assert output.args[0] == {"role": "assistant", "content": "hi there"}
     assert handler._last_assistant_response == "hi there"
+    assert handler._is_input_suppressed()
+
+
+@pytest.mark.asyncio
+async def test_turn_complete_clears_input_suppression_and_syncs_conversation():
+    handler, bridge = make_handler()
+    handler._last_user_message = "hello"
+    handler._last_assistant_response = "hi there"
+    handler._suppress_input_for_response()
+
+    await handler._handle_turn_complete()
+
     assert not handler._is_input_suppressed()
+    assert bridge.synced == ("hello", "hi there")
