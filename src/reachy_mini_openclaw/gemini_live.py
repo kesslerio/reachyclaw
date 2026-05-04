@@ -133,26 +133,39 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
         self.last_activity_time = self.start_time
 
         max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
+        attempt = 0
+        while not self._shutdown_requested:
             try:
                 await self._run_session()
-                return
+                if self._shutdown_requested:
+                    return
+                logger.warning("Gemini Live session ended; reconnecting")
+                attempt = 0
             except ConnectionClosedError as e:
+                attempt += 1
                 logger.warning(
                     "Gemini Live WebSocket closed unexpectedly (attempt %d/%d): %s", attempt, max_attempts, e
                 )
-                if attempt < max_attempts:
-                    delay = (2 ** (attempt - 1)) + random.uniform(0, 0.5)
-                    logger.info("Retrying Gemini Live in %.1f seconds...", delay)
-                    await asyncio.sleep(delay)
-                    continue
-                raise
+                if attempt >= max_attempts:
+                    raise
+            except Exception as e:
+                if self._shutdown_requested and is_normal_gemini_close(e):
+                    logger.debug("Gemini Live session closed cleanly")
+                    return
+                attempt += 1
+                logger.warning("Gemini Live session failed (attempt %d/%d): %s", attempt, max_attempts, e)
+                if attempt >= max_attempts:
+                    raise
             finally:
                 self.connection = None
                 try:
                     self._connected_event.clear()
                 except Exception:
                     pass
+
+            delay = (2 ** max(attempt - 1, 0)) + random.uniform(0, 0.5)
+            logger.info("Retrying Gemini Live in %.1f seconds...", delay)
+            await asyncio.sleep(delay)
 
     async def _run_session(self) -> None:
         """Run a single Gemini Live session."""
@@ -176,6 +189,7 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
                     logger.debug("Gemini Live session closed cleanly")
                     return
                 raise
+            logger.warning("Gemini Live receive loop ended")
 
     async def _build_system_instructions(self) -> str:
         """Build system instructions for the Gemini voice relay."""
@@ -185,6 +199,8 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
         """Handle a Gemini Live server message."""
         audio_data = getattr(response, "data", None)
         audio_queued = False
+        if config.ENABLE_LATENCY_TRACING:
+            self._trace_gemini_response(response)
         if audio_data is not None:
             await self._queue_audio(audio_data)
             audio_queued = True
@@ -223,6 +239,34 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
 
         if getattr(server_content, "turn_complete", False):
             await self._handle_turn_complete()
+
+    def _trace_gemini_response(self, response: Any) -> None:
+        """Log compact Gemini response shape for live latency debugging."""
+        server_content = getattr(response, "server_content", None)
+        tool_call = getattr(response, "tool_call", None)
+        flags: list[str] = []
+        if getattr(response, "data", None) is not None:
+            flags.append("data")
+        if getattr(response, "text", None):
+            flags.append("text")
+        if tool_call is not None:
+            calls = getattr(tool_call, "function_calls", []) or []
+            flags.append(f"tool_call:{len(calls)}")
+        if server_content is not None:
+            if getattr(server_content, "interrupted", False):
+                flags.append("interrupted")
+            if getattr(server_content, "turn_complete", False):
+                flags.append("turn_complete")
+            if getattr(server_content, "input_transcription", None) is not None:
+                flags.append("input_transcription")
+            if getattr(server_content, "output_transcription", None) is not None:
+                flags.append("output_transcription")
+            model_turn = getattr(server_content, "model_turn", None)
+            if model_turn is not None:
+                parts = getattr(model_turn, "parts", []) or []
+                flags.append(f"model_turn:{len(parts)}")
+        if flags and set(flags) - {"data", "output_transcription", "model_turn:1"}:
+            logger.info("Voice trace gemini_response flags=%s", ",".join(flags))
 
     async def _handle_input_transcription(self, transcription: Any) -> None:
         """Handle user audio transcription from Gemini Live."""
