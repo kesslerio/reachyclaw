@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from reachy_mini_openclaw.gemini_live import GEMINI_OUTPUT_SAMPLE_RATE, GeminiLiveHandler
+from reachy_mini_openclaw.gemini_live import GEMINI_OUTPUT_SAMPLE_RATE, GeminiLiveHandler, is_normal_gemini_close
 from reachy_mini_openclaw.openclaw_bridge import OpenClawResponse
 
 
@@ -52,6 +52,13 @@ def make_handler():
     )
     bridge = DummyBridge()
     return GeminiLiveHandler(deps, bridge), bridge
+
+
+def test_normal_gemini_close_detects_google_api_close_code():
+    error = Exception("1000 None.")
+    error.status_code = 1000
+
+    assert is_normal_gemini_close(error)
 
 
 def test_live_config_includes_audio_transcription_voice_and_tool():

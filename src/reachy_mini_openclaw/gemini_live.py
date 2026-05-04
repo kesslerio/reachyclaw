@@ -26,6 +26,12 @@ GEMINI_INPUT_SAMPLE_RATE: Final[Literal[16000]] = 16000
 GEMINI_OUTPUT_SAMPLE_RATE: Final[Literal[24000]] = 24000
 
 
+def is_normal_gemini_close(error: Exception) -> bool:
+    """Return True when google-genai wraps a clean WebSocket close as an APIError."""
+    status_code = getattr(error, "status_code", None) or getattr(error, "code", None)
+    return status_code == 1000 or str(error).startswith("1000 ")
+
+
 class GeminiLiveHandler(OpenAIRealtimeHandler):
     """Voice relay handler backed by Gemini Live.
 
@@ -152,8 +158,14 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
             self.connection = session
             self._connected_event.set()
 
-            async for response in session.receive():
-                await self._handle_response(response)
+            try:
+                async for response in session.receive():
+                    await self._handle_response(response)
+            except Exception as e:
+                if self._shutdown_requested and is_normal_gemini_close(e):
+                    logger.debug("Gemini Live session closed cleanly")
+                    return
+                raise
 
     async def _build_system_instructions(self) -> str:
         """Build system instructions for the Gemini voice relay."""
@@ -353,4 +365,3 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
                 self.output_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-
