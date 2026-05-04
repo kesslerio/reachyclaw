@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import random
+import time
 from typing import Any, Final, Literal
 
 import numpy as np
@@ -299,14 +300,26 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
             name = getattr(function_call, "name", "")
             args = getattr(function_call, "args", {}) or {}
             call_id = getattr(function_call, "id", None)
+            trace_id = self._new_trace_id("gemini", name)
+            started_at = time.monotonic()
 
             logger.info("Gemini tool call: %s(%s)", name, str(args)[:80])
+            if trace_id:
+                logger.info("Voice trace tool_start traceId=%s provider=gemini tool=%s", trace_id, name)
 
             try:
-                result = await self._handle_gemini_tool_call(name, args)
+                result = await self._handle_gemini_tool_call(name, args, trace_id=trace_id)
             except Exception as e:
                 logger.error("Gemini tool '%s' failed: %s", name, e)
                 result = {"error": str(e)}
+            finally:
+                if trace_id:
+                    logger.info(
+                        "Voice trace tool_done traceId=%s provider=gemini tool=%s elapsedMs=%d",
+                        trace_id,
+                        name,
+                        int((time.monotonic() - started_at) * 1000),
+                    )
 
             function_responses.append(
                 self._types.FunctionResponse(
@@ -317,13 +330,25 @@ class GeminiLiveHandler(OpenAIRealtimeHandler):
             )
 
         if self.connection:
+            response_started_at = time.monotonic()
             await self.connection.send_tool_response(function_responses=function_responses)
+            if config.ENABLE_LATENCY_TRACING:
+                logger.info(
+                    "Voice trace gemini_tool_responses_sent count=%d elapsedMs=%d",
+                    len(function_responses),
+                    int((time.monotonic() - response_started_at) * 1000),
+                )
 
-    async def _handle_gemini_tool_call(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    async def _handle_gemini_tool_call(
+        self,
+        name: str,
+        args: dict[str, Any],
+        trace_id: str | None = None,
+    ) -> dict[str, Any]:
         """Dispatch a Gemini function call."""
         args_json = json.dumps(args)
         if name == "ask_openclaw":
-            return await self._handle_openclaw_query(args_json)
+            return await self._handle_openclaw_query(args_json, trace_id=trace_id)
         return await dispatch_tool_call(name, args_json, self.deps)
 
     async def receive(self, frame: tuple[int, NDArray]) -> None:

@@ -160,6 +160,9 @@ OPENAI_VOICE=cedar
 OPENCLAW_GATEWAY_URL=ws://localhost:18789
 OPENCLAW_TOKEN=your-gateway-token       # from ~/.openclaw/openclaw.json → gateway.auth.token
 OPENCLAW_AGENT_ID=main
+OPENCLAW_SESSION_KEY=main
+OPENCLAW_VOICE_TIMEOUT=25
+REACHYCLAW_TRACE_LATENCY=false
 
 ENABLE_FACE_TRACKING=true
 HEAD_TRACKER_TYPE=mediapipe
@@ -170,6 +173,27 @@ HEAD_TRACKER_TYPE=mediapipe
 OpenAI Realtime and Gemini Live both act as voice relays. They should call `ask_openclaw` for every user utterance, wait for OpenClaw, and speak the returned answer verbatim.
 
 Gemini Live uses raw 16-bit PCM audio. Its native input rate is 16 kHz and output is 24 kHz, so ReachyClaw resamples microphone input before sending it to Gemini and plays Gemini output at 24 kHz. Gemini Live is currently a preview API; validate turn-taking, interruption behavior, voice quality, and tool-call reliability on your robot before making it your default.
+
+### Latency and Dedicated OpenClaw Agents
+
+For a robot that should know one user's identity while staying responsive, use a dedicated OpenClaw agent such as `niemand-family-reachyclaw`. Keep that agent's workspace pointed at the source identity files (`AGENTS.md`, `USER.md`, `SOUL.md`, `MEMORY.md`) instead of copying personal context into ReachyClaw.
+
+Voice turns can be bounded with `OPENCLAW_VOICE_TIMEOUT` and traced with `REACHYCLAW_TRACE_LATENCY=true`. Tracing emits correlated `traceId`, OpenClaw `runId`, idempotency key, and elapsed-millisecond log lines around provider tool calls, OpenClaw acknowledgement, first OpenClaw event, final OpenClaw response, and local body-action execution.
+
+Dynamic memory search can dominate voice latency. For a dedicated robot route, prefer an OpenClaw per-agent memory override that disables or tightly bounds memory search for the robot agent while identity continues to come from the workspace bootstrap files.
+
+Run a gateway-only smoke test before debugging the realtime provider:
+
+```bash
+python scripts/reachyclaw-smoke-openclaw.py \
+  --agent-id niemand-family-reachyclaw \
+  --session-key reachyclaw \
+  --gateway-url ws://localhost:18789 \
+  --timeout 25 \
+  --include-body-context
+```
+
+See [docs/reachyclaw-latency-smoke.md](docs/reachyclaw-latency-smoke.md) for log interpretation and OpenClaw agent configuration notes.
 
 ## Usage
 

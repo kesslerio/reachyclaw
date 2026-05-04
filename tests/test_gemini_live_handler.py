@@ -36,8 +36,15 @@ class DummyBridge:
     def __init__(self):
         self.queries = []
 
-    async def chat(self, query, image_b64=None, system_context=None):
-        self.queries.append((query, image_b64, system_context))
+    async def chat(
+        self,
+        query,
+        image_b64=None,
+        system_context=None,
+        timeout=None,
+        trace_id=None,
+    ):
+        self.queries.append((query, image_b64, system_context, timeout, trace_id))
         return OpenClawResponse(content="[EMOTION:happy] hello there")
 
     async def sync_conversation(self, user_message, assistant_response):
@@ -78,10 +85,16 @@ def test_live_config_includes_audio_transcription_voice_and_tool():
 async def test_gemini_tool_call_invokes_openclaw_bridge():
     handler, bridge = make_handler()
 
-    result = await handler._handle_gemini_tool_call("ask_openclaw", {"query": "hi"})
+    result = await handler._handle_gemini_tool_call(
+        "ask_openclaw",
+        {"query": "hi"},
+        trace_id="trace-test",
+    )
 
-    assert result == {"response": "hello there"}
+    assert result == {"response": "hello there", "trace_id": "trace-test"}
     assert bridge.queries[0][0] == "hi"
+    assert bridge.queries[0][3] == 25.0
+    assert bridge.queries[0][4] == "trace-test"
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,23 @@ load_dotenv(_project_root / ".env")
 VALID_REALTIME_PROVIDERS = {"openai", "gemini"}
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
 @dataclass
 class Config:
     """Application configuration loaded from environment variables."""
@@ -40,6 +57,8 @@ class Config:
     # Session key for OpenClaw - uses "main" to share context with WhatsApp and other channels
     # Format: agent:<agent_id>:<session_key>, but we only need the session key part here
     OPENCLAW_SESSION_KEY: str = field(default_factory=lambda: os.getenv("OPENCLAW_SESSION_KEY", "main"))
+    OPENCLAW_VOICE_TIMEOUT: float = field(default_factory=lambda: _env_float("OPENCLAW_VOICE_TIMEOUT", 25.0))
+    ENABLE_LATENCY_TRACING: bool = field(default_factory=lambda: _env_bool("REACHYCLAW_TRACE_LATENCY", False))
 
     # Robot Configuration
     ROBOT_NAME: str | None = field(default_factory=lambda: os.getenv("ROBOT_NAME"))
@@ -74,6 +93,8 @@ class Config:
             errors.append("OPENAI_API_KEY is required")
         if self.REALTIME_PROVIDER == "gemini" and not self.GEMINI_API_KEY:
             errors.append("GEMINI_API_KEY is required")
+        if self.OPENCLAW_VOICE_TIMEOUT <= 0:
+            errors.append("OPENCLAW_VOICE_TIMEOUT must be greater than 0")
 
         return errors
 
